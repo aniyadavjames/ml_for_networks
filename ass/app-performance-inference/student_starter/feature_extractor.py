@@ -30,6 +30,7 @@ import numpy as np
 from typing import Dict
 
 
+
 # =============================================================================
 # METRIC-SPECIFIC FEATURE EXTRACTORS
 # Implement specialized features for each QoE metric below
@@ -49,11 +50,78 @@ def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
 
     Returns:
         Dictionary mapping feature names to float values
+
     """
     df = pd.read_csv(video_traffic_path)
+    print(f"Loaded {len(df)} packets for resolution feature extraction.")
+    print(f"Columns: {df.columns.tolist()}")
+
     features = {}
 
     # === TODO: Implement your features for resolution prediction ===
+
+
+    #converting to only one source and destination port column
+    df['portSrc'] = df['tcpPortSrc'].fillna(df['udpPortSrc']) 
+    df['portDst'] = df['tcpPortDst'].fillna(df['udpPortDst']) 
+
+    #get student and youtuber ip address
+    student_ip = df[df['portDst'] == 443]['ipSrc'].unique()
+    youtube_ip = df[df['portSrc'] == 443]['ipSrc'].unique()
+
+    print(f"Student IP: {student_ip}")
+    print(f"YouTuber IP: {youtube_ip}")
+
+
+        #filtering only downloadpacket
+    download_df = df[df['ipDst'] == student_ip[0]] 
+
+
+
+    # Resolution correlates with throughput
+    download_df['packet_size'] = download_df['tcpLen'].fillna(0) + download_df['udpLen'].fillna(0)
+    duration = download_df['timestamp'].max() - download_df['timestamp'].min()
+    features['throughput'] = download_df['packet_size'].sum() / max(duration, 0.001)
+    features['avg_packet_size'] = download_df['packet_size'].mean()
+    features['std_packet_size'] = download_df['packet_size'].std()
+    features['num_packets'] = len(download_df)
+
+
+
+    #calculating unique packet sizes and frequencies
+    unique_sizes = download_df['packet_size'].unique()
+    features['unique_packet_sizes'] = len(unique_sizes)
+
+    #creating classes of pkts
+   
+    avg_size = download_df['packet_size'].mean()
+    std_size = download_df['packet_size'].std()
+    max_size = download_df['packet_size'].max()
+    min_size = download_df['packet_size'].min()
+
+    
+    class_names = ['tiny_sz_pkt', 'small_sz_pkt', 'average_sz_pkt', 'medium_large_sz_pkt', 'large_sz_pkt', 'Jumbo_sz_pkt']
+
+    # bins
+    bins = [min_size - 1, avg_size - std_size, avg_size, avg_size + 0.5*std_size, avg_size + std_size, avg_size + 2*std_size, max_size + 1]
+    bins = sorted(list(set(bins)))
+
+
+    download_df['packet_class'] = pd.cut(
+        download_df['packet_size'], 
+        bins=bins, 
+        labels=class_names, 
+        include_lowest=True
+    )
+
+
+    packet_classes=download_df['packet_class'].value_counts().sort_index()
+    print(f"Packet class distribution:\n{packet_classes}")
+
+    for class_name, count in packet_classes.items():
+        features[f'{class_name}_count'] = count
+
+    
 
     return features
 
@@ -161,7 +229,9 @@ def extract_features(video_traffic_path: str) -> Dict[str, float]:
         ('switch', extract_features_switches),
     ]:
         try:
+            print(f"Running {extractor.__name__} extractor...")
             metric_features = extractor(video_traffic_path)
+            print(f"Extracted {len(metric_features)} features for {prefix} metric.")
             for name, value in metric_features.items():
                 features[f'{prefix}_{name}'] = value
         except Exception as e:
@@ -240,7 +310,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         test_path = sys.argv[1]
     else:
-        test_path = 'data/train/train_00000/video_traffic.csv'
+        test_path = 'student_data/train/train_00000/video_traffic.csv'
 
     print(f"Testing feature extraction on: {test_path}")
     print("=" * 60)
