@@ -75,6 +75,7 @@ def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
 
         #filtering only downloadpacket
     download_df = df[df['ipDst'] == student_ip[0]] 
+    upload_df=df[df['ipDst'] == youtube_ip[0]] 
 
 
 
@@ -86,6 +87,8 @@ def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
     features['std_packet_size'] = download_df['packet_size'].std()
     features['num_packets'] = len(download_df)
 
+    #upside/downside ratio of packets
+    features['up/ds'] = len(upload_df)/len(download_df)
 
 
     #calculating unique packet sizes and frequencies
@@ -98,29 +101,6 @@ def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
     std_size = download_df['packet_size'].std()
     max_size = download_df['packet_size'].max()
     min_size = download_df['packet_size'].min()
-
-    
-    class_names = ['tiny_sz_pkt', 'small_sz_pkt', 'average_sz_pkt', 'medium_large_sz_pkt', 'large_sz_pkt', 'Jumbo_sz_pkt']
-
-    # bins
-    bins = [min_size - 1, avg_size - std_size, avg_size, avg_size + 0.5*std_size, avg_size + std_size, avg_size + 2*std_size, max_size + 1]
-    bins = sorted(list(set(bins)))
-
-
-    download_df['packet_class'] = pd.cut(
-        download_df['packet_size'], 
-        bins=bins, 
-        labels=class_names, 
-        include_lowest=True
-    )
-
-
-    packet_classes=download_df['packet_class'].value_counts().sort_index()
-    print(f"Packet class distribution:\n{packet_classes}")
-
-    for class_name, count in packet_classes.items():
-        features[f'{class_name}_count'] = count
-
     
 
     return features
@@ -171,6 +151,8 @@ def extract_features_startup(video_traffic_path: str) -> Dict[str, float]:
     features = {}
 
     # === TODO: Implement your features for startup latency prediction ===
+    
+    
 
 
     return features
@@ -194,8 +176,40 @@ def extract_features_switches(video_traffic_path: str) -> Dict[str, float]:
     """
     df = pd.read_csv(video_traffic_path)
     features = {}
+    
+     # === TODO: Implement your features for bitrate switch prediction ===
+     
+    #sta of (iat between sent request)
+    #converting to only one source and destination port column
+    df['portSrc'] = df['tcpPortSrc'].fillna(df['udpPortSrc']) 
+    df['portDst'] = df['tcpPortDst'].fillna(df['udpPortDst']) 
 
-    # === TODO: Implement your features for bitrate switch prediction ===
+    #get student and youtuber ip address
+    student_ip = df[df['portDst'] == 443]['ipSrc'].unique()
+    youtube_ip = df[df['portSrc'] == 443]['ipSrc'].unique()
+
+    print(f"Student IP: {student_ip}")
+    print(f"YouTuber IP: {youtube_ip}")
+
+
+    #filtering only downloadpacket
+    download_df = df[df['ipDst'] == student_ip[0]] 
+    upload_df=df[df['ipDst'] == youtube_ip[0]] 
+    upload_df_sorted = upload_df.sort_values(by='timestamp')
+    upload_df_sorted['inter_arrival_time'] = upload_df_sorted['timestamp'].diff()
+    
+    print(upload_df_sorted)
+    features['avg_iat']=upload_df_sorted['inter_arrival_time'].mean()
+    features['std_iat']=upload_df_sorted['inter_arrival_time'].std()
+    
+    
+    
+    
+    
+
+
+
+   
 
 
     return features
