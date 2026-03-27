@@ -18,7 +18,7 @@ from feature_extractor import (
     extract_features_switches,
 )
 
-DATA_DIR = Path('data')
+DATA_DIR = Path('student_data')
 TRAIN_DIR = DATA_DIR / 'train'
 
 QOE_TARGETS = [

@@ -24,14 +24,14 @@ from feature_extractor import (
 
 
 # Configuration
-DATA_DIR = Path('data')
+DATA_DIR = Path('student_data')
 TRAIN_DIR = DATA_DIR / 'train'
 
 # QoE targets and their corresponding feature extractors
 QOE_CONFIG = {
-    'avg_resolution': extract_features_resolution,
-    'rebuffering_ratio': extract_features_rebuffering,
-    'startup_latency': extract_features_startup,
+    # 'avg_resolution': extract_features_resolution,
+    # 'rebuffering_ratio': extract_features_rebuffering,
+    # 'startup_latency': extract_features_startup,
     'bitrate_switches_per_second': extract_features_switches,
 }
 

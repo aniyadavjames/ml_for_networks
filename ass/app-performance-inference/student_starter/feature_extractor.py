@@ -36,6 +36,41 @@ from typing import Dict
 # Implement specialized features for each QoE metric below
 # =============================================================================
 
+def compute_rms(x):
+    return np.sqrt(np.mean(np.square(x))) if len(x) > 0 else 0
+def safe_div(a, b):
+    return a / (b + 1e-6)
+
+def preprocess(video_traffic_path):
+    df = pd.read_csv(video_traffic_path)
+
+    df['portSrc'] = df['tcpPortSrc'].fillna(df['udpPortSrc'])
+    df['portDst'] = df['tcpPortDst'].fillna(df['udpPortDst'])
+
+    student_ip = df[df['portDst'] == 443]['ipSrc'].unique()
+    youtube_ip = df[df['portSrc'] == 443]['ipDst'].unique() 
+
+    if len(student_ip) == 0 or len(youtube_ip) == 0:
+        return None, None
+
+    student_ip = student_ip[0]
+    youtube_ip = youtube_ip[0]
+
+    download_df = df[df['ipDst'] == student_ip].copy()
+    upload_df = df[df['ipSrc'] == student_ip].copy()
+    trace_start = df['timestamp'].min()
+    
+    if len(download_df) == 0:
+        return None, None
+
+    download_df['packet_size'] = download_df['tcpLen'].fillna(0) + download_df['udpLen'].fillna(0)
+
+    t0 = download_df['timestamp'].min()
+    download_df['time_bin'] = ((download_df['timestamp'] - t0)).astype(int)
+
+    return download_df, upload_df,trace_start
+
+
 def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
     """
     Extract features for predicting AVERAGE RESOLUTION.
@@ -53,57 +88,70 @@ def extract_features_resolution(video_traffic_path: str) -> Dict[str, float]:
 
     """
     df = pd.read_csv(video_traffic_path)
-    print(f"Loaded {len(df)} packets for resolution feature extraction.")
-    print(f"Columns: {df.columns.tolist()}")
+    # print(f"Loaded {len(df)} packets for resolution feature extraction.")
+    # print(f"Columns: {df.columns.tolist()}")
 
     features = {}
+    
 
     # === TODO: Implement your features for resolution prediction ===
 
-
-    #converting to only one source and destination port column
-    df['portSrc'] = df['tcpPortSrc'].fillna(df['udpPortSrc']) 
-    df['portDst'] = df['tcpPortDst'].fillna(df['udpPortDst']) 
-
-    #get student and youtuber ip address
-    student_ip = df[df['portDst'] == 443]['ipSrc'].unique()
-    youtube_ip = df[df['portSrc'] == 443]['ipSrc'].unique()
-
-    print(f"Student IP: {student_ip}")
-    print(f"YouTuber IP: {youtube_ip}")
-
-
-        #filtering only downloadpacket
-    download_df = df[df['ipDst'] == student_ip[0]] 
-    upload_df=df[df['ipDst'] == youtube_ip[0]] 
-
-
-
-    # Resolution correlates with throughput
-    download_df['packet_size'] = download_df['tcpLen'].fillna(0) + download_df['udpLen'].fillna(0)
+    download_df,upload_df,trace_start = preprocess(video_traffic_path)
+    if download_df is None:
+        return {}
+    
     duration = download_df['timestamp'].max() - download_df['timestamp'].min()
-    features['throughput'] = download_df['packet_size'].sum() / max(duration, 0.001)
+    duration = max(duration, 0.1)
+
+    
+    download_df['packet_size'] = download_df['tcpLen'].fillna(0) + download_df['udpLen'].fillna(0)
+    features['throughput'] = download_df['packet_size'].sum() / duration
+    features['up_ds_ratio'] = len(upload_df) / max(len(download_df), 1)
     features['avg_packet_size'] = download_df['packet_size'].mean()
-    features['std_packet_size'] = download_df['packet_size'].std()
-    features['num_packets'] = len(download_df)
 
-    #upside/downside ratio of packets
-    features['up/ds'] = len(upload_df)/len(download_df)
+    
+    download_df['time_bin'] = (download_df['timestamp'] - download_df['timestamp'].min()).astype(int)
+    bin_stats = download_df.groupby('time_bin')['packet_size'].sum()
+    
+    features['p90_throughput'] = bin_stats.quantile(0.9) if not bin_stats.empty else 0
+    features['throughput_var'] = bin_stats.std() / (bin_stats.mean() + 1e-6) # Coeff of Variation
 
+    
+    active_bins = (bin_stats > (bin_stats.mean() * 0.5)).sum()
+    features['burst_duty_cycle'] = active_bins / len(bin_stats) if len(bin_stats) > 0 else 0
 
-    #calculating unique packet sizes and frequencies
-    unique_sizes = download_df['packet_size'].unique()
-    features['unique_packet_sizes'] = len(unique_sizes)
+    
+    if len(download_df) > 1:
+        download_df['iat'] = download_df['timestamp'].diff()
+        features['iat_jitter'] = download_df['iat'].std()
+        features['max_gap'] = download_df['iat'].max()
+    else:
+        features['iat_jitter'] = 0
+        features['max_gap'] = 0
+        
+        
+        
+    bin_tp = download_df.groupby('time_bin')['packet_size'].sum()
 
-    #creating classes of pkts
-   
-    avg_size = download_df['packet_size'].mean()
-    std_size = download_df['packet_size'].std()
-    max_size = download_df['packet_size'].max()
-    min_size = download_df['packet_size'].min()
+    features['tp_mean'] = bin_tp.mean()
+    features['tp_p50'] = bin_tp.quantile(0.5)
+    features['tp_p90'] = bin_tp.quantile(0.9)
+
+    features['tp_rms'] = compute_rms(bin_tp.values)
+    features['tp_cv'] = safe_div(bin_tp.std(), bin_tp.mean())
+
+    features['burstiness'] = safe_div(bin_tp.max() - bin_tp.min(), bin_tp.mean())
+
+    features['stable_tp_ratio'] = (bin_tp > bin_tp.mean()*0.7).sum() / max(len(bin_tp),1)
+
+    threshold = bin_tp.mean() * 0.3
+    features['low_tp_ratio'] = (bin_tp < threshold).sum() / max(len(bin_tp),1)
+    
     
 
     return features
+
+
 
 
 def extract_features_rebuffering(video_traffic_path: str) -> Dict[str, float]:
@@ -122,10 +170,74 @@ def extract_features_rebuffering(video_traffic_path: str) -> Dict[str, float]:
     Returns:
         Dictionary mapping feature names to float values
     """
-    df = pd.read_csv(video_traffic_path)
-    features = {}
-
     # === TODO: Implement your features for rebuffering prediction ===
+    features={}
+
+    download_df,upload_df,trace_start = preprocess(video_traffic_path)
+    if download_df is None:
+        return {}
+
+    
+    duration = download_df['timestamp'].max() - download_df['timestamp'].min()
+    duration = max(duration, 0.1)
+    
+    
+    bin_tp = download_df.groupby('time_bin')['packet_size'].sum()
+
+    # Throughput stability
+    features['tp_rms'] = compute_rms(bin_tp.values)
+    features['tp_min'] = bin_tp.min()
+    features['tp_p10'] = bin_tp.quantile(0.1)
+
+    threshold = bin_tp.mean() * 0.4
+    features['low_tp_ratio'] = (bin_tp < threshold).sum() / max(len(bin_tp),1)
+
+    # Throughput variation
+    features['tp_diff_rms'] = compute_rms(np.diff(bin_tp.values)) if len(bin_tp) > 1 else 0
+
+    # GAP FEATURES (CRITICAL)
+    gaps = download_df['timestamp'].diff().dropna()
+
+    features['gap_rms'] = compute_rms(gaps)
+    features['gap_cv'] = safe_div(gaps.std(), gaps.mean())
+    features['long_gap_ratio'] = (gaps > 1.0).sum() / max(len(gaps),1)
+
+    # BUFFER PROXY (VERY POWERFUL)
+    features['buffer_proxy'] = safe_div(bin_tp.mean(), features['gap_rms'])
+
+    return features
+
+
+
+
+
+    # 2. GAP ANALYSIS (The "Stall" Detector)
+    gaps = download_df['timestamp'].diff().dropna()
+    features['max_gap'] = gaps.max() if not gaps.empty else 0
+    # Count "critical" gaps where the player likely ran out of buffer
+    features['stall_freq_long'] = (gaps > 2.0).sum() 
+    features['stall_freq_med'] = (gaps > 0.5).sum()
+
+    # 3. ROLLING THROUGHPUT (Local Starvation)
+    # Instead of global bins, use a rolling 2-second window to find the "worst" moment
+    download_df['cum_bytes'] = download_df['packet_size'].cumsum()
+    # Set index to timestamp to use rolling time windows
+    download_df.index = pd.to_datetime(download_df['timestamp'], unit='s')
+    rolling_tp = download_df['packet_size'].rolling('2s').sum()
+    
+    features['min_rolling_tp'] = rolling_tp.min()
+    features['avg_rolling_tp'] = rolling_tp.mean()
+    # If the worst 2 seconds is way lower than the average, it's a rebuffer
+    features['tp_drop_severity'] = rolling_tp.min() / (rolling_tp.mean() + 1e-6)
+
+    # 4. VOLATILITY
+    features['cv_tp'] = rolling_tp.std() / (rolling_tp.mean() + 1e-6)
+
+    # 5. RE-FILL SPEED
+    # After a gap, how fast does the data come back? (Slow recovery = longer rebuffer)
+    features['throughput'] = download_df['packet_size'].sum() / duration
+
+    
 
 
     return features
@@ -147,9 +259,90 @@ def extract_features_startup(video_traffic_path: str) -> Dict[str, float]:
     Returns:
         Dictionary mapping feature names to float values
     """
-    df = pd.read_csv(video_traffic_path)
+    
+    download_df,upload_df,trace_start = preprocess(video_traffic_path)
+    features = {}
+    if download_df is None:
+        return {}
+
+
+    download_df['cum_bytes'] = download_df['packet_size'].cumsum()
+
+    
+    start_time = download_df['timestamp'].min()
+    
     features = {}
 
+    # --- COMPLEX FEATURE 1: Time to X Megabytes ---
+    # The most direct proxy for startup latency: how long to get the first 1MB or 2MB?
+
+    target = 1 * 1024 * 1024
+    reached = download_df[download_df['cum_bytes'] >= target]
+
+    if not reached.empty:
+        features['time_to_1mb'] = reached['timestamp'].iloc[0] - start_time
+    else:
+        features['time_to_1mb'] = download_df['timestamp'].max() - start_time
+
+    # Initial burst (first 2 sec)
+    first_2s = download_df[download_df['timestamp'] <= (start_time + 2)]
+
+    features['initial_bytes'] = first_2s['packet_size'].sum()
+    features['initial_rate'] = features['initial_bytes'] / 2.0
+    features['initial_tp_rms'] = compute_rms(first_2s['packet_size'].values)
+
+    # Delay features
+    features['network_init_delay'] = start_time - trace_start
+    features['first_packet_delay'] = start_time - trace_start
+
+    # Packet timing
+    if len(download_df) > 10:
+        features['first_10_pkt_time'] = download_df.iloc[9]['timestamp'] - start_time
+    else:
+        features['first_10_pkt_time'] = 0
+
+    return features
+
+
+
+
+    
+    target_bytes = 1 * 1024 * 1024  # 1 MB
+    target_reached = download_df[download_df['cumulative_bytes'] >= target_bytes]
+    
+    if not target_reached.empty:
+        features['time_to_1mb'] = target_reached['timestamp'].iloc[0] - start_time
+    else:
+        # If it never reached 1MB, it's a very slow session
+        features['time_to_1mb'] = download_df['timestamp'].max() - start_time
+
+    # --- COMPLEX FEATURE 2: Initial Burst Rate (First 2 Seconds) ---
+    # Heavy initial throughput usually means a fast start.
+    first_2s = download_df[download_df['timestamp'] <= (start_time + 2.0)]
+    features['initial_burst_total'] = first_2s['packet_size'].sum()
+    features['initial_burst_rate'] = features['initial_burst_total'] / 2.0
+
+    # --- COMPLEX FEATURE 3: Transport Handshake / RTT Proxy ---
+    # The time between the very first packet in the trace and the first download packet
+    # captures the "network distance" or DNS/TLS handshake overhead.
+    trace_start = df['timestamp'].min()
+    features['network_init_delay'] = start_time - trace_start
+
+    # --- COMPLEX FEATURE 4: Initial Packet Frequency ---
+    # High frequency (low inter-arrival time) in the first 100 packets.
+    if len(download_df) > 10:
+        first_100 = download_df.head(100)
+        features['initial_iat_avg'] = first_100['timestamp'].diff().mean()
+    else:
+        features['initial_iat_avg'] = 0
+
+    return features
+
+
+    features['throughput'] = download_df['packet_size'].sum() / max(duration, 0.001)
+    features['avg_packet_size'] = download_df['packet_size'].mean()
+    features['std_packet_size'] = download_df['packet_size'].std()
+    features['num_packets'] = len(download_df)
     # === TODO: Implement your features for startup latency prediction ===
     
     
@@ -174,51 +367,160 @@ def extract_features_switches(video_traffic_path: str) -> Dict[str, float]:
     Returns:
         Dictionary mapping feature names to float values
     """
-    df = pd.read_csv(video_traffic_path)
     features = {}
+    download_df,upload_df,trace_start = preprocess(video_traffic_path)
+    if download_df is None:
+        return {}
     
-     # === TODO: Implement your features for bitrate switch prediction ===
-     
-    #sta of (iat between sent request)
-    #converting to only one source and destination port column
-    df['portSrc'] = df['tcpPortSrc'].fillna(df['udpPortSrc']) 
-    df['portDst'] = df['tcpPortDst'].fillna(df['udpPortDst']) 
+    
+    duration = download_df['timestamp'].max() - download_df['timestamp'].min()
+    duration = max(duration, 0.1)
 
-    #get student and youtuber ip address
-    student_ip = df[df['portDst'] == 443]['ipSrc'].unique()
-    youtube_ip = df[df['portSrc'] == 443]['ipSrc'].unique()
-
-    print(f"Student IP: {student_ip}")
-    print(f"YouTuber IP: {youtube_ip}")
+    
+    download_df['time_bin_2s'] = ((download_df['timestamp'] - download_df['timestamp'].min()) // 2)
+    # bin_tp = download_df.groupby('time_bin_2s')['packet_size'].sum()
 
 
-    #filtering only downloadpacket
-    download_df = df[df['ipDst'] == student_ip[0]] 
-    upload_df=df[df['ipDst'] == youtube_ip[0]] 
+    # if len(bin_tp) > 1:
+    #     tp_pct_change = bin_tp.pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+
+    #     features['throughput_shocks'] = (tp_pct_change.abs() > 0.5).sum() / len(bin_tp)  # ✅ FIXED NORMALIZATION
+    #     features['max_shock'] = tp_pct_change.abs().max()
+    # else:
+    #     features['throughput_shocks'] = 0
+    #     features['max_shock'] = 0
+
+    # upload_df = upload_df.sort_values(by='timestamp')
+
+    # if len(upload_df) > 1:
+    #     iat = upload_df['timestamp'].diff().dropna()
+    #     features['avg_iat'] = iat.mean()
+    #     features['iat_std_norm'] = iat.std() / (iat.mean() + 1e-6)
+    # else:
+    #     features['avg_iat'] = 0
+    #     features['iat_std_norm'] = 0
+
+
+    # if not bin_tp.empty:
+    #     features['cv_throughput'] = bin_tp.std() / (bin_tp.mean() + 1e-6)
+    # else:
+    #     features['cv_throughput'] = 0
+
+
+    # if len(bin_tp) > 2:
+    #     diffs = np.diff(bin_tp.values)
+    #     reversals = np.where(np.diff(np.sign(diffs)))[0]
+    #     features['trend_reversals_rate'] = len(reversals) / len(bin_tp)  # ✅ FIXED
+    # else:
+    #     features['trend_reversals_rate'] = 0
+
+    # features = {k: (0 if (np.isnan(v) or np.isinf(v)) else v) for k, v in features.items()}
+
+    # return features
+
+
+
+    
+    
+    
     upload_df_sorted = upload_df.sort_values(by='timestamp')
     upload_df_sorted['inter_arrival_time'] = upload_df_sorted['timestamp'].diff()
     
-    print(upload_df_sorted)
+
+    
+    duration = download_df['timestamp'].max() - download_df['timestamp'].min()
+    duration = max(duration, 0.1)
+
+    # --- COMPLEX FEATURE 1: Throughput Shocks ---
+    # We bin throughput by 2-second windows and count "significant" changes
+    download_df['time_bin'] = (download_df['timestamp'] - download_df['timestamp'].min()) // 2
+    bin_tp = download_df.groupby('time_bin')['packet_size'].sum()
+    
+    
+    if len(bin_tp) > 1:
+        # Calculate percentage change between consecutive windows
+        tp_pct_change = bin_tp.pct_change().dropna()
+        tp_pct_change = bin_tp.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+        # A "shock" is a change > 50% (either up or down)
+        features['throughput_shocks'] = (tp_pct_change.abs() > 0.5).sum() / duration
+        features['max_shock'] = tp_pct_change.abs().max()
+    else:
+        features['throughput_shocks'] = 0
+        features['max_shock'] = 0
+
+    # --- COMPLEX FEATURE 2: Request Frequency Stability (Your IAT logic) ---
+    upload_df = upload_df.sort_values(by='timestamp')
+    if len(upload_df) > 1:
+        iat = upload_df['timestamp'].diff().dropna()
+        features['avg_iat'] = iat.mean()
+        features['iat_std_norm'] = iat.std() / (iat.mean() + 1e-6) # Normalized jitter
+    else:
+        features['avg_iat'] = 0
+        features['iat_std_norm'] = 0
+
+    # --- COMPLEX FEATURE 3: Coefficient of Variation (CV) ---
+    # High CV = High instability = More switches
+    if not bin_tp.empty:
+        features['cv_throughput'] = bin_tp.std() / (bin_tp.mean() + 1e-6)
+    else:
+        features['cv_throughput'] = 0
+
+    # --- COMPLEX FEATURE 4: Throughput Trend Reversals ---
+    # Count how many times the throughput goes from increasing to decreasing
+    if len(bin_tp) > 2:
+        diffs = np.diff(bin_tp)
+        # Check where the sign of the difference changes
+        reversals = np.where(np.diff(np.sign(diffs)))[0]
+        features['trend_reversals_rate'] = len(reversals) / duration
+    else:
+        features['trend_reversals_rate'] = 0
+        
+    bin_tp = download_df.groupby('time_bin')['packet_size'].sum()
+
+    # Instability metrics
+    features['tp_rms'] = compute_rms(bin_tp.values)
+    features['tp_cv'] = safe_div(bin_tp.std(), bin_tp.mean())
+
+    # Sudden changes
+    if len(bin_tp) > 1:
+        diff = np.diff(bin_tp.values)
+        features['tp_diff_rms'] = compute_rms(diff)
+    else:
+        features['tp_diff_rms'] = 0
+
+    # Shock detection
+    if len(bin_tp) > 1:
+        pct = pd.Series(bin_tp).pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+        features['shock_rate'] = (pct.abs() > 0.5).sum()
+        features['max_shock'] = pct.abs().max()
+    else:
+        features['shock_rate'] = 0
+        features['max_shock'] = 0
+
+    # Trend reversals
+    if len(bin_tp) > 2:
+        diffs = np.diff(bin_tp.values)
+        features['sign_changes'] = np.sum(np.diff(np.sign(diffs)) != 0)
+    else:
+        features['sign_changes'] = 0
+
+    return features
+
+    
+    
+    
+    
+    
+    # print(upload_df_sorted)
     features['avg_iat']=upload_df_sorted['inter_arrival_time'].mean()
     features['std_iat']=upload_df_sorted['inter_arrival_time'].std()
     
     
     
-    
-    
-
-
-
-   
-
-
     return features
 
 
-# =============================================================================
-# MAIN FEATURE EXTRACTOR
-# This function combines all metric-specific extractors
-# =============================================================================
+
 
 def extract_features(video_traffic_path: str) -> Dict[str, float]:
     """
@@ -254,9 +556,6 @@ def extract_features(video_traffic_path: str) -> Dict[str, float]:
     return features
 
 
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
 
 def extract_features_for_all_sessions(
     data_dir: str,
